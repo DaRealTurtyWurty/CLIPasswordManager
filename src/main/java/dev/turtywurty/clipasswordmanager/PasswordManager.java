@@ -1,11 +1,10 @@
 package dev.turtywurty.clipasswordmanager;
 
-import com.google.gson.Gson;
-import com.google.gson.GsonBuilder;
-import com.google.gson.JsonArray;
-import com.google.gson.JsonObject;
+import com.google.gson.*;
 import dev.turtywurty.clipasswordmanager.data.PasswordEntry;
+import org.springframework.security.crypto.bcrypt.BCrypt;
 import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
+import org.springframework.security.crypto.scrypt.SCryptPasswordEncoder;
 
 import java.io.IOException;
 import java.nio.file.Files;
@@ -15,7 +14,7 @@ import java.util.*;
 public class PasswordManager {
     private final Scanner scanner = new Scanner(System.in);
     private final CLIParseUtils parseUtils = new CLIParseUtils(this.scanner);
-    private final Path passwordEntriesPath = Path.of("~/password_entries.json");
+    private final Path passwordEntriesPath = Path.of(System.getProperty("user.home"), "password_entries.json");
     private final Gson gson = new GsonBuilder().setPrettyPrinting().disableHtmlEscaping().create();
     private final BCryptPasswordEncoder passwordEncoder = new BCryptPasswordEncoder();
 
@@ -48,6 +47,8 @@ public class PasswordManager {
             return;
         }
 
+        scanner.nextLine();
+
         switch (action) {
             case 1 -> createEntry();
             case 2 -> retrieveEntry();
@@ -61,10 +62,9 @@ public class PasswordManager {
 
     private void createEntry() {
         System.out.println("""
-                Please select all that apply (e.g. "1, 2, 3")
+                Please select all that apply (e.g. "1, 2")
                 1. Username
                 2. Email
-                3. Password
                 69. Cancel""");
 
         Optional<Integer[]> actions = this.parseUtils.tryReadInts();
@@ -80,21 +80,22 @@ public class PasswordManager {
             return;
         }
 
-        List<Integer> actionsList = List.of(actionsArr);
-        if(actionsList.contains(69)) {
+        if(Arrays.stream(actionsArr).anyMatch(action -> action == 69)) {
             run();
             return;
         }
 
         Map<String, String> supplied = new HashMap<>();
-        actionsList.forEach(action -> {
+        for (Integer action : actionsArr) {
             switch (action) {
                 case 1 -> supplied.put("username", createEntry("username"));
                 case 2 -> supplied.put("email", createEntry("email"));
-                case 3 -> supplied.put("password", createEntry("password"));
                 default -> System.out.printf("The number you entered (%d) does not correspond to a valid action!%n", action);
             }
-        });
+        }
+
+        // required password
+        supplied.put("password", createEntry("password"));
 
         // required name
         System.out.println("Enter a name for this entry: ");
@@ -105,20 +106,19 @@ public class PasswordManager {
             return;
         }
 
-        // required website
+        // optional website
         System.out.println("Enter a website for this entry: ");
         String website = this.scanner.nextLine();
         if(website.isBlank()) {
-            System.out.println("Your entry website cannot be blank!");
-            createEntry();
+            website = null;
             return;
-        }
-
-        // validate website
-        if(!website.startsWith("http://") && !website.startsWith("https://")) {
-            System.out.println("Your entry website must be a valid website!");
-            createEntry();
-            return;
+        } else {
+            // validate website
+            if(!website.startsWith("http://") && !website.startsWith("https://")) {
+                System.out.println("Your entry website must be a valid website!");
+                createEntry();
+                return;
+            }
         }
 
         // optional description
@@ -143,10 +143,10 @@ public class PasswordManager {
             note = null;
         }
 
-        var builder = new PasswordEntry.Builder(name, website)
+        var builder = new PasswordEntry.Builder(name, supplied.get("password"))
+                .website(website)
                 .username(supplied.getOrDefault("username", null))
                 .email(supplied.getOrDefault("email", null))
-                .password(supplied.getOrDefault("password", null))
                 .description(description)
                 .tags(tags)
                 .notes(note);
@@ -188,11 +188,135 @@ public class PasswordManager {
     }
 
     private void retrieveEntry() {
+        System.out.println("""
+                Please select a way to retrieve your entry:
+                1. Name
+                2. Website
+                3. Username
+                4. Email
+                69. Cancel""");
 
+        int action = this.parseUtils.tryReadInt().orElse(-1);
+
+        if(action < 1 || action > 4 && action != 69) {
+            System.out.println("The number you entered does not correspond to a valid action!");
+            retrieveEntry();
+            return;
+        }
+
+        if(action == 69) {
+            run();
+            return;
+        }
+
+        Optional<PasswordEntry> entry;
+        switch (action) {
+            case 1 -> entry = retrieveEntry("name");
+            case 2 -> entry = retrieveEntry("website");
+            case 3 -> entry = retrieveEntry("username");
+            case 4 -> entry = retrieveEntry("email");
+            default -> {
+                System.out.printf("The number you entered (%d) does not correspond to a valid action!%n", action);
+                run();
+                return;
+            }
+        };
+
+        if(entry.isEmpty()) {
+            System.out.println("No entry was found with the given information!");
+            retrieveEntry();
+            return;
+        }
+
+        System.out.println("Your entry has been found!");
+        System.out.println(entry.get());
+    }
+
+    private Optional<PasswordEntry> retrieveEntry(String name) {
+        try {
+            if (Files.notExists(this.passwordEntriesPath)) {
+                return Optional.empty();
+            }
+
+            String content = Files.readString(this.passwordEntriesPath);
+            JsonArray data = this.gson.fromJson(content, JsonArray.class);
+            List<PasswordEntry> entries = new ArrayList<>();
+            for (JsonElement element : data) {
+                JsonObject object = element.getAsJsonObject();
+                PasswordEntry.Builder builder =
+                        new PasswordEntry.Builder(
+                                object.get("name").getAsString(),
+                                object.get("password").getAsString());
+
+                if (object.has("website"))
+                    builder.website(object.get("website").getAsString());
+
+                if (object.has("username"))
+                    builder.username(object.get("username").getAsString());
+
+                if (object.has("email"))
+                    builder.email(object.get("email").getAsString());
+
+                if (object.has("description"))
+                    builder.description(object.get("description").getAsString());
+
+                if (object.has("tags")) {
+                    JsonArray tags = object.get("tags").getAsJsonArray();
+                    List<String> tagsList = new ArrayList<>();
+                    for (JsonElement tag : tags) {
+                        tagsList.add(tag.getAsString());
+                    }
+
+                    builder.tags(tagsList.toArray(new String[0]));
+                }
+
+                if (object.has("notes")) {
+                    JsonArray notes = object.get("notes").getAsJsonArray();
+                    List<String> notesList = new ArrayList<>();
+                    for (JsonElement note : notes) {
+                        notesList.add(note.getAsString());
+                    }
+
+                    builder.notes(notesList.toArray(new String[0]));
+                }
+
+                entries.add(builder.build());
+            }
+
+            return entries.stream().filter(entry -> {
+                switch (name) {
+                    case "name" -> {
+                        System.out.println("Enter the name of the entry you want to retrieve: ");
+                        String value = this.scanner.nextLine();
+                        return entry.getName().equalsIgnoreCase(value);
+                    }
+                    case "website" -> {
+                        System.out.println("Enter the website of the entry you want to retrieve: ");
+                        String value = this.scanner.nextLine();
+                        return entry.getWebsite().equalsIgnoreCase(value);
+                    }
+                    case "username" -> {
+                        System.out.println("Enter the username of the entry you want to retrieve: ");
+                        String value = this.scanner.nextLine();
+                        return entry.getUsername().equalsIgnoreCase(value);
+                    }
+                    case "email" -> {
+                        System.out.println("Enter the email of the entry you want to retrieve: ");
+                        String value = this.scanner.nextLine();
+                        return entry.getEmail().equalsIgnoreCase(value);
+                    }
+                    default -> throw new IllegalStateException("Unexpected value: " + name);
+                }
+            }).findFirst();
+        } catch (IOException exception) {
+            exception.printStackTrace();
+            return Optional.empty();
+        }
     }
 
     private void savePasswordEntry(PasswordEntry entry) throws IOException {
         if(Files.notExists(this.passwordEntriesPath)) {
+            Files.createDirectories(this.passwordEntriesPath.getParent());
             Files.createFile(this.passwordEntriesPath);
             Files.writeString(this.passwordEntriesPath, this.gson.toJson(new JsonArray()));
         }
@@ -201,28 +325,27 @@ public class PasswordManager {
 
         var entryJson = new JsonObject();
         entryJson.addProperty("name", entry.getName());
-
         entryJson.addProperty("website", entry.getWebsite());
 
-        if(entry.getUsername() != null)
+        if(entry.getUsername() != null && !entry.getUsername().isEmpty())
             entryJson.addProperty("username", entry.getUsername());
 
-        if(entry.getEmail() != null)
+        if(entry.getEmail() != null && !entry.getEmail().isEmpty())
             entryJson.addProperty("email", entry.getEmail());
 
-        if(entry.getPassword() != null)
+        if(entry.getPassword() != null && !entry.getPassword().isEmpty())
             entryJson.addProperty("password", this.passwordEncoder.encode(entry.getPassword()));
 
-        if(entry.getDescription() != null)
+        if(entry.getDescription() != null && !entry.getDescription().isEmpty())
             entryJson.addProperty("description", entry.getDescription());
 
-        if(entry.getTags() != null) {
+        if(entry.getTags() != null && !entry.getTags().isEmpty()) {
             var tags = new JsonArray();
             entry.getTags().forEach(tags::add);
             entryJson.add("tags", tags);
         }
 
-        if(entry.getNotes() != null) {
+        if(entry.getNotes() != null && !entry.getNotes().isEmpty()) {
             var notes = new JsonArray();
             entry.getNotes().forEach(notes::add);
             entryJson.add("notes", notes);

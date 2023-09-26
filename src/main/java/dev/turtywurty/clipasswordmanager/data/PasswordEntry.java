@@ -80,18 +80,23 @@ public class PasswordEntry {
 
     public static class Builder {
         private final String name;
-        private final String website;
+        private final String password;
         private final List<String> tags = new ArrayList<>();
         private final List<String> notes = new ArrayList<>();
 
+        private String website;
         private String username;
         private String email;
-        private String password;
         private String description;
 
-        public Builder(String name, String website) {
+        public Builder(String name, String password) {
             this.name = name;
+            this.password = password;
+        }
+
+        public Builder website(String website) {
             this.website = website;
+            return this;
         }
 
         public Builder username(String username) {
@@ -101,11 +106,6 @@ public class PasswordEntry {
 
         public Builder email(String email) {
             this.email = email;
-            return this;
-        }
-
-        public Builder password(String password) {
-            this.password = password;
             return this;
         }
 
